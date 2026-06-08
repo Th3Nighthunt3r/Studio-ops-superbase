@@ -497,13 +497,22 @@ function identityGate(){
 function pgToday(v){
   const todayIso=isoDay(new Date());
   const dayLogs=S.daily.filter(l=>l.date===S.day);
-  const dueToday=S.tasks.filter(t=>t.due===S.day && t.status!=='dn');
+  const activeToday=S.tasks.filter(t=>{
+    if(t.status==='dn')return false;
+    if(t.status==='ip'){
+      if(t.start&&t.due)return S.day>=t.start&&S.day<=t.due;
+      if(t.start)return S.day>=t.start;
+      if(t.due)return S.day<=t.due;
+      return true;
+    }
+    return t.due===S.day;
+  });
   const doneCt=dayLogs.filter(l=>l.done).length;
 
   const head=el(`<div class="pagehead">
     <div>
       <div class="ttl">Daily Tracking</div>
-      <div class="meta"><span><b>${dayLogs.length}</b> entries</span><span><b>${doneCt}</b> done</span><span><b>${dueToday.length}</b> due today</span></div>
+      <div class="meta"><span><b>${dayLogs.length}</b> entries</span><span><b>${doneCt}</b> done</span><span><b>${activeToday.length}</b> active today</span></div>
     </div>
     <div style="display:flex;gap:10px;align-items:center">
       <button class="btn sm" id="todayBtn">Today</button>
@@ -526,14 +535,15 @@ function pgToday(v){
   ordered.forEach(m=>cards.appendChild(memberDayCard(m, dayLogs.filter(l=>l.member===m.id))));
   grid.appendChild(cards);
 
-  // side: due today
+  // side: active today (all team tasks)
   const side=el('<div style="display:grid;gap:14px"></div>');
-  const due=el(`<div class="card side-card"><h3>${ICON.clock} Due ${S.day===todayIso?'today':fmtShort(S.day)}</h3></div>`);
-  if(dueToday.length){ dueToday.forEach(t=>{
+  const due=el(`<div class="card side-card"><h3>${ICON.clock} Active ${S.day===todayIso?'today':fmtShort(S.day)}</h3></div>`);
+  if(activeToday.length){ activeToday.forEach(t=>{
     const m=member(t.assignee);
-    const r=el(`<div class="duerow">${m?`<span class="avatar sm" style="background:${m.color}">${initials(m.name)}</span>`:''}<span class="t">${esc(t.title)}</span><span class="pill ${STATUSES.find(s=>s.id===t.status).cls}">${STATUSES.find(s=>s.id===t.status).label}</span></div>`);
+    const st=STATUSES.find(s=>s.id===t.status);
+    const r=el(`<div class="duerow">${m?`<span class="avatar sm" style="background:${m.color}">${initials(m.name)}</span>`:''}<span class="t">${esc(t.title)}</span><span class="pill ${st.cls}">${st.label}</span></div>`);
     r.style.cursor='pointer'; r.onclick=()=>openTask(t); due.appendChild(r);
-  }); } else due.appendChild(el('<div class="empty" style="padding:20px">Nothing due</div>'));
+  }); } else due.appendChild(el('<div class="empty" style="padding:20px">Nothing active</div>'));
   side.appendChild(due);
   grid.appendChild(side);
   v.appendChild(grid);
@@ -766,7 +776,7 @@ function pgRes(v){
   v.appendChild(bar);
 
   let items=S.resources.slice().reverse();
-  if(S.resType==='link') items=items.filter(r=>r.type==='link');
+  if(S.resType==='link') items=items.filter(r=>r.url);
   else if(S.resType==='wp') items=items.filter(r=>r.type==='shot'||r.type==='file');
   else if(S.resType==='shot') items=items.filter(r=>r.type==='shot'||r.imgUrl||(r.imgUrls&&r.imgUrls.length));
   if(!items.length){ v.appendChild(el('<div class="empty">No resources yet — add drive links, files, or progress screenshots.</div>')); return; }
