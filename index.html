@@ -184,7 +184,7 @@
   table.mx thead th.today{color:var(--acc)}
   table.mx .who{text-align:left;padding:10px 14px;width:170px}
   table.mx .who .nm{font-weight:600;font-size:13px;display:flex;align-items:center;gap:9px}
-  .cell{height:54px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:.14s;flex-direction:column;gap:3px}
+  .cell{min-height:54px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:.14s;flex-direction:column;gap:2px;padding:4px 3px}
   .cell:hover{background:var(--acc-soft)}
   .cell .n{font-family:var(--mono);font-size:15px;font-weight:600}
   .cell.zero .n{color:var(--tx-faint)}
@@ -431,6 +431,20 @@ async function save(key){
 }
 async function setMe(id){ S.me=id; await DB.set('tm:me', id, false); }
 
+/* board tasks active on a given day for a member */
+function getActiveTasks(memberId, dayIso){
+  return S.tasks.filter(t=>{
+    if(t.assignee!==memberId||t.status==='dn')return false;
+    if(t.status==='ip'){
+      if(t.start&&t.due)return dayIso>=t.start&&dayIso<=t.due;
+      if(t.start)return dayIso>=t.start;
+      if(t.due)return dayIso<=t.due;
+      return true;
+    }
+    return t.due===dayIso;
+  });
+}
+
 /* ============================ render root ============================ */
 function render(){
   renderTabs(); renderUserChip();
@@ -541,6 +555,20 @@ function memberDayCard(m, logs){
     card.appendChild(row);
   });
   if(!logs.length) card.appendChild(el('<div class="logrow" style="color:var(--tx-faint);font-size:12.5px">No entries yet.</div>'));
+  // Board tasks active on this day for this member
+  const boardTasks=getActiveTasks(m.id,S.day);
+  boardTasks.forEach(t=>{
+    const st=STATUSES.find(s=>s.id===t.status);
+    const brow=el(`<div class="logrow" style="border-left:2px solid var(--acc-dim);background:rgba(255,138,61,.04)">
+      <div style="width:18px;height:18px;border-radius:5px;background:var(--acc-soft);flex:none;margin-top:1px;display:grid;place-items:center;color:var(--acc)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:9px;height:9px"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="9" y="3" width="5" height="11" rx="1"/><rect x="15" y="3" width="5" height="15" rx="1"/></svg></div>
+      <div class="body"><div class="txt" style="font-size:13px">${esc(t.title)}</div>
+        <div class="sub"><span class="pill ${st.cls}" style="font-size:9px;padding:2px 6px">${st.label}</span>${t.due?`<span class="tag">${ICON.clock}${fmtShort(t.due)}</span>`:''}</div>
+      </div>
+    </div>`);
+    brow.style.cursor='pointer';
+    brow.onclick=()=>openTask(t);
+    card.appendChild(brow);
+  });
   if(isMe){
     const add=el(`<div class="addlog">
       <input placeholder="What are you working on?" />
@@ -605,8 +633,15 @@ function pgWeek(v){
     const tr=el(`<tr><td class="who"><div class="nm"><span class="avatar sm" style="background:${m.color}">${initials(m.name)}</span>${esc(m.name)}</div></td></tr>`);
     days.forEach(d=>{
       const n=S.daily.filter(l=>l.date===d&&l.member===m.id).length;
+      const activeTasks=getActiveTasks(m.id,d);
+      const total=n+activeTasks.length;
       const td=el(`<td class="${d===todayIso?'todaycol':''}"></td>`);
-      const cell=el(`<div class="cell ${n?'':'zero'}"><span class="n">${n||'·'}</span>${n?`<span class="bars">${'<i></i>'.repeat(Math.min(n,5))}</span>`:''}</div>`);
+      const cell=el(`<div class="cell ${total?'':'zero'}"></div>`);
+      activeTasks.forEach(t=>{
+        cell.appendChild(el(`<span style="font-family:var(--mono);font-size:9px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:88px;padding:1px 4px;margin:1px 0;border-radius:3px;background:var(--acc-soft);color:var(--acc)">${esc(t.title.slice(0,15))}</span>`));
+      });
+      if(n) cell.appendChild(el(`<span style="font-family:var(--mono);font-size:10px;color:var(--tx-mut)">${n} log${n>1?'s':''}</span>`));
+      if(!total) cell.appendChild(el(`<span class="n">·</span>`));
       cell.onclick=()=>{S.day=d;S.page='today';render();};
       td.appendChild(cell); tr.appendChild(td);
     });
@@ -728,7 +763,9 @@ function pgRes(v){
   v.appendChild(bar);
 
   let items=S.resources.slice().reverse();
-  if(S.resType!=='all') items=items.filter(r=>r.type===S.resType);
+  if(S.resType==='link') items=items.filter(r=>r.url);
+  else if(S.resType==='file') items=items.filter(r=>r.type==='file');
+  else if(S.resType==='shot') items=items.filter(r=>r.type==='shot'||r.imgUrl||(r.imgUrls&&r.imgUrls.length));
   if(!items.length){ v.appendChild(el('<div class="empty">No resources yet — add drive links, files, or progress screenshots.</div>')); return; }
 
   if(S.resView==='list'){
@@ -860,43 +897,108 @@ function openTask(existing){
   setTimeout(()=>body.querySelector('#tTitle').focus(),50);
 }
 
-/* --- resource modal --- */
-function openRes(){
-  let type='link', imgData=null;
+/* --- resource modal (create + edit) --- */
+function openRes(existing){
+  const isEdit=existing&&existing.id;
+  let type=existing?existing.type:'link';
+  let imgDataList=[]; // new images (data URLs) pending upload
+  let existingImgUrls=existing?(existing.imgUrls&&existing.imgUrls.length?existing.imgUrls.slice():(existing.imgUrl?[existing.imgUrl]:[])):[];
+  let existingImgPaths=existing?(existing.imgPaths&&existing.imgPaths.length?existing.imgPaths.slice():(existing.imgPath?[existing.imgPath]:[])):[];
+
   const body=el(`<div style="display:grid;gap:15px">
     <div class="fld"><label>Type</label><div class="seg" id="rType">
-      <button data-t="link" class="on">${ICON.link} Link</button>
-      <button data-t="file">${ICON.file} File</button>
-      <button data-t="shot">${ICON.shot} Screenshot</button>
+      <button data-t="link" class="${type==='link'?'on':''}">${ICON.link} Link</button>
+      <button data-t="file" class="${type==='file'?'on':''}">${ICON.file} File</button>
+      <button data-t="shot" class="${type==='shot'?'on':''}">${ICON.shot} Screenshot</button>
     </div></div>
-    <div class="fld"><label>Title</label><input id="rTitle" placeholder="e.g. Final renders — Drive folder"/></div>
-    <div class="fld" id="urlFld"><label>URL</label><input id="rUrl" placeholder="https://drive.google.com/…"/></div>
-    <div class="fld hide" id="imgFld"><label>Image</label><div class="drop" id="drop">Click or paste / drop an image here</div><input type="file" id="fInput" accept="image/*" class="hide"/></div>
-    <div class="fld"><label>Note (optional)</label><textarea id="rNote" placeholder="What is this, what stage…"></textarea></div>
-    <div class="fld"><label>Link to task (optional)</label><select id="rTask"><option value="">— none —</option>${S.tasks.map(t=>`<option value="${t.id}">${esc(t.title)}</option>`).join('')}</select></div>
+    <div class="fld"><label>Title</label><input id="rTitle" value="${esc(existing?existing.title:'')}" placeholder="e.g. Final renders — Drive folder"/></div>
+    <div class="fld ${type==='shot'?'hide':''}" id="urlFld"><label>URL</label><input id="rUrl" value="${esc(existing?existing.url||'':'')}" placeholder="https://drive.google.com/…"/></div>
+    <div class="fld ${type!=='shot'?'hide':''}" id="imgFld">
+      <label>Images</label>
+      <div id="imgPreviews" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+      <div class="drop" id="drop">Click, paste or drop images here — multiple allowed</div>
+      <input type="file" id="fInput" accept="image/*" multiple class="hide"/>
+    </div>
+    <div class="fld"><label>Note (optional)</label><textarea id="rNote" placeholder="What is this, what stage…">${esc(existing?existing.note||'':'')}</textarea></div>
+    <div class="fld"><label>Link to task (optional)</label><select id="rTask"><option value="">— none —</option>${S.tasks.map(t=>`<option value="${t.id}" ${existing&&existing.task===t.id?'selected':''}>${esc(t.title)}</option>`).join('')}</select></div>
   </div>`);
-  const urlFld=body.querySelector('#urlFld'), imgFld=body.querySelector('#imgFld'), drop=body.querySelector('#drop'), fInput=body.querySelector('#fInput');
-  body.querySelector('#rType').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;type=b.dataset.t;body.querySelectorAll('#rType button').forEach(x=>x.classList.remove('on'));b.classList.add('on');imgFld.classList.toggle('hide',type!=='shot');});
-  const handleFile=f=>{ if(!f||!f.type.startsWith('image/'))return; const fr=new FileReader(); fr.onload=()=>resizeImg(fr.result,d=>{imgData=d;drop.innerHTML=`<img src="${d}">`;}); fr.readAsDataURL(f); };
+
+  const urlFld=body.querySelector('#urlFld'),imgFld=body.querySelector('#imgFld'),drop=body.querySelector('#drop'),fInput=body.querySelector('#fInput');
+
+  function renderPreviews(){
+    const ct=body.querySelector('#imgPreviews'); ct.innerHTML='';
+    existingImgUrls.forEach((url,i)=>{
+      const th=el(`<div style="position:relative;display:inline-block"><img src="${esc(url)}" style="height:76px;width:76px;object-fit:cover;border-radius:7px;border:1px solid var(--line);display:block"><button style="position:absolute;top:-5px;right:-5px;background:var(--red);color:#fff;border-radius:50%;width:17px;height:17px;font-size:11px;line-height:17px;text-align:center;cursor:pointer">×</button></div>`);
+      th.querySelector('button').onclick=()=>{existingImgUrls.splice(i,1);existingImgPaths.splice(i,1);renderPreviews();};
+      ct.appendChild(th);
+    });
+    imgDataList.forEach((d,i)=>{
+      const th=el(`<div style="position:relative;display:inline-block"><img src="${d}" style="height:76px;width:76px;object-fit:cover;border-radius:7px;border:1px solid var(--line);display:block"><button style="position:absolute;top:-5px;right:-5px;background:var(--red);color:#fff;border-radius:50%;width:17px;height:17px;font-size:11px;line-height:17px;text-align:center;cursor:pointer">×</button></div>`);
+      th.querySelector('button').onclick=()=>{imgDataList.splice(i,1);renderPreviews();};
+      ct.appendChild(th);
+    });
+  }
+  if(type==='shot') renderPreviews();
+
+  body.querySelector('#rType').addEventListener('click',e=>{
+    const b=e.target.closest('button');if(!b)return;
+    type=b.dataset.t;
+    body.querySelectorAll('#rType button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
+    imgFld.classList.toggle('hide',type!=='shot');
+    urlFld.classList.toggle('hide',type==='shot');
+  });
+
+  const handleFiles=files=>{
+    [...files].forEach(f=>{
+      if(!f||!f.type.startsWith('image/'))return;
+      const fr=new FileReader();
+      fr.onload=()=>resizeImg(fr.result,d=>{imgDataList.push(d);renderPreviews();});
+      fr.readAsDataURL(f);
+    });
+  };
   drop.onclick=()=>fInput.click();
-  fInput.onchange=()=>handleFile(fInput.files[0]);
+  fInput.onchange=()=>handleFiles(fInput.files);
   drop.addEventListener('dragover',e=>{e.preventDefault();drop.style.borderColor='var(--acc)';});
   drop.addEventListener('dragleave',()=>drop.style.borderColor='');
-  drop.addEventListener('drop',e=>{e.preventDefault();drop.style.borderColor='';handleFile(e.dataTransfer.files[0]);});
-  body.addEventListener('paste',e=>{const it=[...e.clipboardData.items].find(i=>i.type.startsWith('image/'));if(it&&type==='shot')handleFile(it.getAsFile());});
+  drop.addEventListener('drop',e=>{e.preventDefault();drop.style.borderColor='';handleFiles(e.dataTransfer.files);});
+  body.addEventListener('paste',e=>{
+    if(type!=='shot')return;
+    handleFiles([...e.clipboardData.items].filter(i=>i.type.startsWith('image/')).map(i=>i.getAsFile()));
+  });
 
-  const foot=el(`<div class="mfoot"><button class="btn ghost" id="c">Cancel</button><button class="btn acc" id="s">Add resource</button></div>`);
+  const foot=el(`<div class="mfoot">
+    ${isEdit?`<button class="btn ghost" id="del" style="margin-right:auto;color:var(--red)">Delete</button>`:''}
+    <button class="btn ghost" id="c">Cancel</button>
+    <button class="btn acc" id="s">${isEdit?'Save changes':'Add resource'}</button>
+  </div>`);
   foot.querySelector('#c').onclick=closeModal;
+  if(isEdit) foot.querySelector('#del').onclick=async()=>{
+    if(!confirm('Delete this resource?'))return;
+    if(sb){
+      const paths=(existing.imgPaths||[]);
+      if(existing.imgPath&&!paths.includes(existing.imgPath))paths.push(existing.imgPath);
+      for(const p of paths){if(p){try{await sb.storage.from('screenshots').remove([p]);}catch(e){}}}
+    }
+    S.resources=S.resources.filter(x=>x.id!==existing.id);
+    await save('resources');closeModal();render();toast('Deleted');
+  };
   foot.querySelector('#s').onclick=async()=>{
-    const title=body.querySelector('#rTitle').value.trim(); if(!title){toast('Title required');return;}
+    const title=body.querySelector('#rTitle').value.trim();if(!title){toast('Title required');return;}
     const url=body.querySelector('#rUrl').value.trim();
     if(type!=='shot'&&!url){toast('URL required');return;}
-    if(type==='shot'&&!imgData&&!url){toast('Add an image or URL');return;}
-    const r={id:uid(),type,title,url,note:body.querySelector('#rNote').value.trim(),task:body.querySelector('#rTask').value||null,by:S.me,date:isoDay(new Date()),imgUrl:null,imgPath:null};
-    if(imgData){ const up=await uploadShot(imgData); if(up){ r.imgUrl=up.url; r.imgPath=up.path; } }
-    S.resources.push(r); await save('resources'); closeModal(); render(); toast('Resource added');
+    if(type==='shot'&&existingImgUrls.length===0&&imgDataList.length===0&&!url){toast('Add an image or URL');return;}
+    // upload new images
+    const newUploads=[];
+    for(const d of imgDataList){const up=await uploadShot(d);if(up)newUploads.push(up);}
+    const allUrls=[...existingImgUrls,...newUploads.map(u=>u.url)];
+    const allPaths=[...existingImgPaths,...newUploads.map(u=>u.path).filter(Boolean)];
+    const data={type,title,url,note:body.querySelector('#rNote').value.trim(),task:body.querySelector('#rTask').value||null,
+      imgUrl:allUrls[0]||null,imgPath:allPaths[0]||null,imgUrls:allUrls,imgPaths:allPaths};
+    if(isEdit){ Object.assign(existing,data); }
+    else { S.resources.push(Object.assign({id:uid(),by:S.me,date:isoDay(new Date())},data)); }
+    await save('resources');closeModal();render();toast(isEdit?'Resource saved':'Resource added');
   };
-  openModal(modalShell('Add Resource', body, foot));
+  openModal(modalShell(isEdit?'Edit Resource':'Add Resource',body,foot));
   setTimeout(()=>body.querySelector('#rTitle').focus(),50);
 }
 function resizeImg(src,cb){
@@ -907,14 +1009,31 @@ function resizeImg(src,cb){
 function openResView(r){
   const m=member(r.by),tk=S.tasks.find(x=>x.id===r.task);
   const body=el(`<div style="display:grid;gap:14px"></div>`);
-  if(r.imgUrl){ body.appendChild(el(`<div style="border-radius:11px;overflow:hidden;border:1px solid var(--line)"><img style="width:100%;display:block" alt="" src="${esc(r.imgUrl)}"></div>`)); }
+  const imgs=r.imgUrls&&r.imgUrls.length?r.imgUrls:(r.imgUrl?[r.imgUrl]:[]);
+  if(imgs.length===1){
+    body.appendChild(el(`<div style="border-radius:11px;overflow:hidden;border:1px solid var(--line)"><img style="width:100%;display:block" alt="" src="${esc(imgs[0])}"></div>`));
+  } else if(imgs.length>1){
+    const grid=el(`<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:5px;border-radius:11px;overflow:hidden;border:1px solid var(--line)"></div>`);
+    imgs.forEach(url=>grid.appendChild(el(`<div style="overflow:hidden"><img style="width:100%;height:150px;object-fit:cover;display:block" alt="" src="${esc(url)}"></div>`)));
+    body.appendChild(grid);
+  }
   body.appendChild(el(`<div>${resBadge(r.type)}<div style="font-family:var(--disp);font-weight:700;font-size:19px;margin-top:10px;letter-spacing:-.01em">${esc(r.title)}</div></div>`));
   if(r.note) body.appendChild(el(`<p style="color:var(--tx-mut);font-size:13.5px;line-height:1.55">${esc(r.note)}</p>`));
   body.appendChild(el(`<div class="mono" style="font-size:11px;color:var(--tx-faint);display:flex;gap:14px;flex-wrap:wrap">${m?`<span>by ${esc(m.name)}</span>`:''}<span>${fmtDay(r.date)}</span>${tk?`<span style="color:var(--acc)">↳ ${esc(tk.title)}</span>`:''}</div>`));
-  const foot=el(`<div class="mfoot"><button class="btn ghost" id="del" style="margin-right:auto;color:var(--red)">Delete</button>${r.url?`<a class="btn acc" href="${esc(r.url)}" target="_blank" rel="noopener">${ICON.ext} Open</a>`:'<button class="btn" id="c">Close</button>'}</div>`);
-  foot.querySelector('#del').onclick=async()=>{ if(!confirm('Delete this resource?'))return; if(r.imgPath&&sb){ try{ await sb.storage.from('screenshots').remove([r.imgPath]); }catch(e){} } S.resources=S.resources.filter(x=>x.id!==r.id); await save('resources'); closeModal(); render(); toast('Deleted'); };
-  const cb=foot.querySelector('#c'); if(cb)cb.onclick=closeModal;
-  openModal(modalShell('Resource', body, foot));
+  const foot=el(`<div class="mfoot"><button class="btn ghost" id="del" style="margin-right:auto;color:var(--red)">Delete</button><button class="btn" id="edit">Edit</button>${r.url?`<a class="btn acc" href="${esc(r.url)}" target="_blank" rel="noopener">${ICON.ext} Open</a>`:'<button class="btn" id="c">Close</button>'}</div>`);
+  foot.querySelector('#del').onclick=async()=>{
+    if(!confirm('Delete this resource?'))return;
+    if(sb){
+      const paths=(r.imgPaths||[]);
+      if(r.imgPath&&!paths.includes(r.imgPath))paths.push(r.imgPath);
+      for(const p of paths){if(p){try{await sb.storage.from('screenshots').remove([p]);}catch(e){}}}
+    }
+    S.resources=S.resources.filter(x=>x.id!==r.id);
+    await save('resources');closeModal();render();toast('Deleted');
+  };
+  foot.querySelector('#edit').onclick=()=>{closeModal();openRes(r);};
+  const cb=foot.querySelector('#c');if(cb)cb.onclick=closeModal;
+  openModal(modalShell('Resource',body,foot));
 }
 
 /* ============================ user switcher ============================ */
